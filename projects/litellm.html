@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="장순돌의 클라우드 인프라 및 SRE 포트폴리오. EKS GitOps, 온콜 자동화, LLM Gateway 운영 경험."><title>Enterprise LLM Gateway 운영 · 장순돌</title><link rel="stylesheet" href="../assets/litellm.css"><link rel="stylesheet" href="../assets/site.css"><script src="../assets/site.js" defer></script></head><body id="top" class="project-page project-litellm"><a class="skip-link" href="#main-content">본문으로 이동</a><nav class="site-nav" aria-label="주요 메뉴"><div class="site-nav-inner"><a class="identity" href="../index.html"><span class="identity-mark" aria-hidden="true">SJ</span><span>장순돌<span class="identity-sub">ENGINEERING PORTFOLIO</span></span></a><div class="site-links"><a href="../index.html">홈</a><a href="../projects/eks.html">EKS / GitOps</a><a href="../projects/oncall.html">OnCall</a><a aria-current="page" href="../projects/litellm.html">LLM Gateway</a></div></div></nav>
+
+<header class="hero"><div class="wrap"><a class="back-link" href="../index.html#projects">← 전체 프로젝트</a><div class="eyebrow">PROJECT 03 / AI INFRASTRUCTURE</div><h1>Enterprise LLM Gateway 운영</h1><p class="lead">
+      개발자가 <code>aws sso login</code> 한 번으로 인증하면 사용자별 Virtual Key가 자동 발급되고,
+      LiteLLM Gateway를 거쳐 Amazon Bedrock의 Claude 모델을 사용하는 구조입니다.
+    </p><div class="project-tags"><span>LiteLLM</span><span>Amazon Bedrock</span><span>AWS CDK</span><span>ECS Fargate</span><span>Azure OpenAI</span></div><div class="project-meta"><div><span>기간</span><b>2026.04 — 운영 시작</b></div><div><span>역할</span><b>AWS 샘플 기반 인프라 배포·운영</b></div><div><span>환경</span><b>Amazon Bedrock · ECS Fargate</b></div></div><div class="ref">
+      <b class="t">Reference · 기반 프로젝트</b>
+      <div class="name">AWS Samples — Claude Code on Bedrock Enterprise Blueprint</div>
+      <a href="https://github.com/aws-samples/sample-aws-kr-enterprise/tree/main/ai-ml/claude-code-bedrock-enterprise-blueprint" target="_blank" rel="noopener noreferrer">github.com/aws-samples/sample-aws-kr-enterprise/tree/main/ai-ml/claude-code-bedrock-enterprise-blueprint</a>
+      <p>
+        AWS에서 공개한 샘플 프로젝트를 받아 사내 AWS 계정에 <b>AWS CDK로 배포하고 운영</b>했습니다.
+        아키텍처와 기본 구현(SSO 연동 Token Service, LiteLLM Gateway, CDK 스택 구조)은 해당 샘플을 따르며,
+        이 문서는 그 구성과 제가 수행한 운영 내용을 정리한 것입니다.
+      </p>
+    </div>
+
+    </div><div class="wrap extra-meta">사용 규모: 5개 팀 · 약 40명 (현재는 전원 이용 종료)</div></header>
+
+<nav class="toc" aria-label="프로젝트 목차">
+  <div class="wrap">
+    <a href="#overview">개요</a>
+    <a href="#architecture">아키텍처</a>
+    <a href="#ops">운영 내용</a>
+    <a href="#stack">기술 스택</a>
+    <a href="#timeline">운영 이력</a>
+    <a href="#impact">도입 효과</a>
+  </div>
+</nav>
+
+<main id="main-content" class="wrap">
+
+<!-- ============================ 1. 개요 ============================ -->
+<section id="overview">
+  <h2><span class="no">01</span>프로젝트 개요</h2>
+  <p class="section-desc">무엇을 운영했는지</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>시스템 개요</h4>
+      <p>
+        Claude Code 등 AI 코딩 도구의 모델 호출을 <b>단일 게이트웨이(LiteLLM Proxy)</b>로 모으고,
+        <b>SSO 인증 → 사용자별 Virtual Key → 팀 예산</b> 단위로 사용량을 관리하는 사내 LLM Gateway입니다.
+      </p>
+    </div>
+    <div class="card">
+      <h4>제가 맡은 범위</h4>
+      <ul>
+        <li>샘플 프로젝트를 기반으로 한 <b>AWS CDK 배포 및 유지보수</b></li>
+        <li>신규 Claude 모델 출시 시 모델 등록 후 재배포</li>
+        <li><b>샘플에 없던 Azure OpenAI(GPT) 모델을 직접 추가 연동</b></li>
+        <li>팀 단위 예산 · 사용자 구성 운영</li>
+        <li>사용량 · 비용 조회 및 월별 집계</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h4>구성 요약</h4>
+    <span class="tag">AWS CDK v2 (TypeScript)</span>
+    <span class="tag">NestedStack 구조 · 단일 루트 배포</span>
+    <span class="tag">LiteLLM Proxy on ECS Fargate</span>
+    <span class="tag">IAM Identity Center SSO</span>
+    <span class="tag">API Gateway + Lambda</span>
+    <span class="tag">Aurora Serverless v2</span>
+    <span class="tag">DynamoDB</span>
+    <span class="tag">Amazon Bedrock</span>
+  </div>
+</section>
+
+<!-- ============================ 2. 아키텍처 ============================ -->
+<section id="architecture">
+  <h2><span class="no">02</span>아키텍처</h2>
+  <p class="section-desc">AWS 샘플 프로젝트가 제공하는 구성을 기반으로 운영한 아키텍처</p>
+
+  <figure>
+    <img src="../assets/litellm/high-level-architecture.png" alt="High Level Architecture">
+    <figcaption>출처: aws-samples/sample-aws-kr-enterprise · claude-code-bedrock-enterprise-blueprint (docs/high-level-architecture.png)</figcaption>
+  </figure>
+
+  <div class="legend">
+    <div><span class="num" style="background:#d64545">1</span><span><b>SSO Login</b> — 개발자가 <code>aws sso login</code>으로 IAM Identity Center 인증</span></div>
+    <div><span class="num" style="background:#d64545">2</span><span><b>SigV4 서명 요청</b> — apiKeyHelper가 SSO 자격증명으로 Token Service(API Gateway) 호출</span></div>
+    <div><span class="num" style="background:#d64545">3</span><span><b>Virtual Key 캐시 조회</b> — Token Service가 DynamoDB에서 사용자의 Virtual Key 조회</span></div>
+    <div><span class="num" style="background:#d64545">4</span><span><b>Virtual Key 생성</b> — 캐시 미스 시 LiteLLM <code>/key/generate</code>로 자동 생성</span></div>
+    <div><span class="num" style="background:#e8832a">5</span><span><b>Virtual Key 인증</b> — Claude Code가 발급된 키로 ALB → LiteLLM Gateway 접근</span></div>
+    <div><span class="num" style="background:#2e9d62">6</span><span><b>Bedrock InvokeModel</b> — LiteLLM이 VPC Endpoint를 통해 Amazon Bedrock 호출</span></div>
+    <div><span class="num" style="background:#7b4ae2">7</span><span><b>Virtual Key / Budget 관리</b> — LiteLLM이 Aurora PostgreSQL에 사용자별 사용량 · 예산 기록</span></div>
+  </div>
+
+  <h3>인프라 스택 구성 (CDK NestedStack)</h3>
+  <p class="section-desc" style="margin-bottom:12px">루트 스택 하나를 배포하면 하위 스택이 의존 순서대로 함께 배포됩니다.</p>
+  <div class="stack">
+    <div class="layer"><div class="lbl">Network</div><div class="body">VPC(2 AZ · Public / Private / Isolated Subnet · NAT GW 1), Security Group, Bedrock VPC Endpoint, S3 / DynamoDB Gateway Endpoint</div></div>
+    <div class="layer"><div class="lbl">Database</div><div class="body">Aurora Serverless v2 (PostgreSQL, 0.5 ~ 4 ACU, Isolated Subnet) — LiteLLM의 Key · Team · 사용량 저장</div></div>
+    <div class="layer"><div class="lbl">Auth</div><div class="body">Token Service (Lambda + API Gateway IAM Auth) — SSO 신원 확인 후 Virtual Key 반환</div></div>
+    <div class="layer"><div class="lbl">Gateway</div><div class="body">ECS Fargate (2 vCPU · 4 GB) 위의 LiteLLM Proxy, ALB (HTTPS · TLS 1.3)</div></div>
+    <div class="layer"><div class="lbl">Monitoring</div><div class="body">CloudWatch Dashboard / Alarm, DynamoDB 설정 테이블</div></div>
+  </div>
+</section>
+
+<!-- ============================ 3. 운영 내용 ============================ -->
+<section id="ops">
+  <h2><span class="no">03</span>운영 내용</h2>
+  <p class="section-desc">현재 이 시스템을 어떻게 사용하고 관리했는지</p>
+
+  <div class="table-scroll" tabindex="0" role="region" aria-label="상세 정보 표"><table>
+    <thead><tr><th>영역</th><th>운영 방식</th></tr></thead>
+    <tbody>
+      <tr><td>배포</td><td>SSO 프로필로 <code>cdk deploy</code> 루트 스택 1회 실행 — 하위 스택이 자동으로 함께 배포. 배포 전 <code>cdk diff / synth</code>로 변경 사항 확인</td></tr>
+      <tr><td>모델 추가</td><td>신규 Claude 모델(Opus / Sonnet 신규 버전 등) 출시 시 CDK의 모델 목록에 등록하고 재배포. 변경 이력은 Git으로 관리</td></tr>
+      <tr><td>외부 모델 연동<br><span style="font-weight:400;color:var(--sub);font-size:12px">(샘플 대비 추가)</span></td><td>샘플은 Bedrock Claude만 지원하므로, 사내 Azure API Management(APIM)를 경유하는 <b>Azure OpenAI GPT 모델(GPT-4.1 mini, GPT-5.4 mini)을 LiteLLM에 추가 연동</b>. 동일한 Gateway · Virtual Key · 팀 예산 체계 안에서 Claude와 GPT를 함께 사용하도록 구성. API 키는 Secrets Manager에 보관하고 ECS 환경변수로 주입. 호출 경로는 LiteLLM → NAT Gateway → APIM → Azure OpenAI (위 아키텍처 그림에는 없는 경로)</td></tr>
+      <tr><td>사용자 · 팀</td><td>IAM Identity Center에 사용자를 등록하면 첫 로그인 시 Virtual Key가 자동 발급. 5개 팀 단위로 사용자를 구성하고 팀 예산으로 관리</td></tr>
+      <tr><td>사용량 · 비용</td><td>LiteLLM의 사용량 API를 이용해 사용자 × 모델 단위 사용량을 월별로 집계하고 비용 확인</td></tr>
+      <tr><td>접근 통제</td><td>ALB의 허용 IP 기반 Security Group, 비밀값은 Secrets Manager로 관리</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>개발자 측 사용 흐름</h3>
+<pre>export AWS_PROFILE=&lt;sso-profile&gt;
+aws sso login          # 브라우저에서 사내 SSO 로그인
+
+claude                 # apiKeyHelper가 Token Service 호출 → Virtual Key 자동 사용</pre>
+</section>
+
+<!-- ============================ 4. 기술 스택 ============================ -->
+<section id="stack">
+  <h2><span class="no">04</span>기술 스택</h2>
+  <p class="section-desc">&nbsp;</p>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="상세 정보 표"><table>
+    <thead><tr><th>카테고리</th><th>기술</th></tr></thead>
+    <tbody>
+      <tr><td>IaC</td><td>AWS CDK v2 (TypeScript), CloudFormation NestedStack</td></tr>
+      <tr><td>Gateway</td><td>LiteLLM Proxy, ECS Fargate, ALB, ACM</td></tr>
+      <tr><td>인증</td><td>IAM Identity Center, API Gateway (IAM Auth), Lambda (Python), Secrets Manager</td></tr>
+      <tr><td>데이터</td><td>Aurora Serverless v2 (PostgreSQL), DynamoDB</td></tr>
+      <tr><td>AI 모델</td><td>Amazon Bedrock (Claude Opus / Sonnet / Haiku), Azure OpenAI via Azure API Management (GPT-4.1 mini, GPT-5.4 mini)</td></tr>
+      <tr><td>네트워크 · 모니터링</td><td>VPC, NAT Gateway, VPC Endpoint, CloudWatch</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============================ 5. 운영 이력 ============================ -->
+<section id="timeline">
+  <h2><span class="no">05</span>운영 이력</h2>
+  <p class="section-desc">Git 커밋 이력 기준</p>
+  <div class="timeline">
+    <div class="tl"><div class="d">2026.04</div><div class="t">AWS 샘플 프로젝트 기반으로 사내 계정에 배포, 사용자 온보딩 시작. Azure OpenAI(GPT-4.1 mini) 모델 추가 연동</div></div>
+    <div class="tl"><div class="d">2026.05</div><div class="t">팀 단위 예산 구성으로 운영 방식 정리</div></div>
+    <div class="tl"><div class="d">2026.06 ~ 07</div><div class="t">GPT-5.4 mini 추가, 월별 사용량 · 비용 집계 방식 정리, 신규 모델 추가</div></div>
+    <div class="tl"><div class="d">2026.08 ~ 10</div><div class="t">신규 Claude 모델(Opus / Sonnet 신규 버전) 순차 추가 및 재배포</div></div>
+  </div>
+</section>
+
+<!-- ============================ 6. 도입 효과 ============================ -->
+<section id="impact">
+  <h2><span class="no">06</span>도입 효과</h2>
+  <p class="section-desc">&nbsp;</p>
+  <!-- 이 섹션은 직접 작성 -->
+  <div class="card impact-card">
+    <ul>
+      <li>사용자의 비용 사용 통제 및 가시성을 부여하여 어떤 사용자가 많이 쓰는지를 확인할수 있습니다.</li>
+      <li>Litellm 에 속한 기능으로, 특정 문자열들은 답변이 금지되었습니다.</li>
+      <li>AI Agent 에서 AI 사용이 필요할때 Key 만 발급 받으면 바로 사용이 가능하고 비용 확인도 가능하다는 장점이 있습니다.</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+
+
+<aside class="related-projects wrap" aria-label="다른 프로젝트"><p class="kicker">CONTINUE EXPLORING</p><h2>다른 프로젝트 살펴보기</h2><div class="related-grid"><a href="eks.html"><span>PLATFORM ENGINEERING</span><b>EKS 기반 GitOps 운영 플랫폼 ↗</b></a><a href="oncall.html"><span>RELIABILITY & AUTOMATION</span><b>OnCall 자동 알림 시스템 ↗</b></a></div></aside><footer class="site-footer"><div class="wrap footer-row"><div><b>장순돌 · SoonDol Jang</b><p>서비스 개발에서 클라우드 운영까지.</p></div><div class="footer-links"><a href="../index.html">포트폴리오 홈</a><a href="https://github.com/sdjang6253" target="_blank" rel="noopener noreferrer">GitHub ↗</a><a href="https://chingdong.tistory.com/" target="_blank" rel="noopener noreferrer">개인 블로그 ↗</a><a href="#top">맨 위로 ↑</a></div></div></footer></body></html>

@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="장순돌의 클라우드 인프라 및 SRE 포트폴리오. EKS GitOps, 온콜 자동화, LLM Gateway 운영 경험."><title>EKS 기반 GitOps 운영 플랫폼 · 장순돌</title><link rel="stylesheet" href="../assets/eks.css"><link rel="stylesheet" href="../assets/site.css"><script src="../assets/site.js" defer></script></head><body id="top" class="project-page project-eks"><a class="skip-link" href="#main-content">본문으로 이동</a><nav class="site-nav" aria-label="주요 메뉴"><div class="site-nav-inner"><a class="identity" href="../index.html"><span class="identity-mark" aria-hidden="true">SJ</span><span>장순돌<span class="identity-sub">ENGINEERING PORTFOLIO</span></span></a><div class="site-links"><a href="../index.html">홈</a><a aria-current="page" href="../projects/eks.html">EKS / GitOps</a><a href="../projects/oncall.html">OnCall</a><a href="../projects/litellm.html">LLM Gateway</a></div></div></nav>
+
+<header class="hero"><div class="wrap"><a class="back-link" href="../index.html#projects">← 전체 프로젝트</a><div class="eyebrow">PROJECT 01 / PLATFORM ENGINEERING</div><h1>EKS 기반 GitOps 운영 플랫폼</h1><p class="lead">Istio · ArgoCD · Argo Rollouts 로 구성한 멀티 서비스 Kubernetes 운영 환경에서,
+      배포·트래픽·관측·알림 영역을 코드(Git)로 구성하고 운영한 DevOps / SRE 프로젝트</p><div class="project-tags"><span>Amazon EKS</span><span>Istio</span><span>Argo CD</span><span>Argo Rollouts</span><span>OpenTelemetry</span></div><div class="project-meta"><div><span>기간</span><b>2025.04 — 현재</b></div><div><span>역할</span><b>DevOps / SRE · 구축·운영·개선</b></div><div><span>환경</span><b>Amazon EKS · AWS 서울 리전</b></div></div><div class="stats">
+      <div class="stat"><div class="n">13</div><div class="l">서비스 Namespace</div></div>
+      <div class="stat"><div class="n">67</div><div class="l">ArgoCD Application (서비스)</div></div>
+      <div class="stat"><div class="n">5</div><div class="l">EKS 노드그룹</div></div>
+      <div class="stat"><div class="n">34</div><div class="l">Grafana 알림 룰 (EKS·RDS 14 + DB 20)</div></div>
+    </div>
+  </div><div class="wrap extra-meta">형상관리: Git — 단일 devops 저장소</div></header>
+
+<nav class="toc" aria-label="프로젝트 목차"><div class="wrap">
+  <a href="#overview">개요</a><a href="#arch">아키텍처</a><a href="#gitops">배포(GitOps)</a><a href="#traffic">트래픽</a>
+  <a href="#obs">관측·알림</a><a href="#mywork">내가 한 일</a><a href="#stack">기술 스택</a>
+</div></nav><main id="main-content">
+
+<!-- ===================== 1. OVERVIEW ===================== -->
+<section id="overview"><div class="wrap">
+  <h2><span class="no">01</span>프로젝트 개요</h2>
+  <p class="desc">한 개의 EKS 클러스터 위에서 13개 서비스 네임스페이스와 관리(Management) 스택을 Git 선언형으로 운영하는 환경입니다.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>무엇을 운영하는가</h4>
+      <ul>
+        <li>Amazon EKS <b>v1.34</b> 단일 클러스터 (Private Endpoint)</li>
+        <li>서비스 13개 네임스페이스에 <b>67개 ArgoCD Application</b></li>
+        <li>관리 스택: ArgoCD · Argo Rollouts · Istio · OpenTelemetry · Prometheus · Grafana · Loki/Tempo · Kiali · n8n · k6 Operator</li>
+        <li>서비스 → 외부/RDS 접근 통제용 Istio <b>ServiceEntry 54건</b></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>핵심 설계 원칙</h4>
+      <ul>
+        <li><b>Everything as Code</b> — 서비스·관리 스택·알림 룰·ALB 설정까지 모두 Git 관리</li>
+        <li><b>Blue/Green 배포</b> — Argo Rollouts 로 preview 확인 후 promote</li>
+        <li><b>서비스별 진입 경로 분리</b> — 서비스마다 Istio IngressGateway + ALB 그룹</li>
+        <li><b>노드그룹 격리</b> — <code>nodeSelector.role</code> 로 관리/서비스별 노드 분리</li>
+        <li><b>OTel 중심 관측</b> — metric / trace / log 를 한 흐름으로 수집</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note"><b>저장소 구조</b> — 한 저장소에서 클러스터 전체를 표현합니다.</div>
+<pre><code>devops/
+├─ terraform/        EKS 클러스터 · 노드그룹 · Add-on · IAM · SG
+├─ aws/eks/          LB Controller · EBS CSI 등 부트스트랩 스크립트 / IAM 정책
+├─ management/       관리 스택 (argocd, argo-rollouts, istio, opentelemetry-collector,
+│                    prometheus, grafana, loki, kiali, n8n, k6, ...)  ← 각 폴더 = Helm values + ArgoCD Application
+├─ services/         서비스 네임스페이스 13개 (prd-*)  ← namespace / project / application / efs-pv-pvc / setup.sh
+└─ management/docs   운영 런북</code></pre>
+</div></section>
+
+<!-- ===================== 2. ARCHITECTURE ===================== -->
+<section id="arch"><div class="wrap">
+  <h2><span class="no">02</span>전체 아키텍처</h2>
+  <p class="desc">외부 요청은 WAF → ALB → 서비스별 Istio IngressGateway → 서비스 Pod 로 흐르고, 외부 호출은 Egress / ServiceEntry 로 통제합니다.</p>
+
+  <figure>
+  <div class="diagram">
+  <svg viewBox="0 0 1100 600" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="13">
+    <defs>
+      <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4b5d78"/></marker>
+      <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f6fed"/></marker>
+    </defs>
+    <!-- edge -->
+    <rect x="20" y="12" width="120" height="44" rx="10" fill="#f1f5fb" stroke="#b8c6dc"/><text x="80" y="31" text-anchor="middle" font-weight="700">외부 사용자</text><text x="80" y="47" text-anchor="middle" fill="#5b6778" font-size="11">고객</text>
+    <rect x="20" y="62" width="120" height="44" rx="10" fill="#f1f5fb" stroke="#b8c6dc"/><text x="80" y="81" text-anchor="middle" font-weight="700">사내망</text><text x="80" y="97" text-anchor="middle" fill="#5b6778" font-size="11">개발자 / 운영자</text>
+    <rect x="170" y="12" width="100" height="44" rx="10" fill="#fff4e5" stroke="#f0c27b"/><text x="220" y="31" text-anchor="middle" font-weight="700">AWS WAF</text><text x="220" y="47" text-anchor="middle" fill="#8a5a10" font-size="11">Web ACL</text>
+    <rect x="300" y="12" width="190" height="44" rx="10" fill="#e8f0ff" stroke="#9db8ee"/><text x="395" y="39" text-anchor="middle" font-weight="700">ALB · Internet-facing</text>
+    <rect x="300" y="62" width="190" height="44" rx="10" fill="#e8f0ff" stroke="#9db8ee"/><text x="395" y="89" text-anchor="middle" font-weight="700">ALB · Internal</text>
+    <text x="540" y="38" fill="#5b6778" font-size="11.5">TLS 1.3 정책 · ACM · 301 리다이렉트</text>
+    <text x="540" y="88" fill="#5b6778" font-size="11.5">사내/내부 도메인 · 관리 도구</text>
+    <!-- 엣지 화살표 : 모두 직선/직각, 박스를 가로지르지 않음 -->
+    <line x1="140" y1="34" x2="168" y2="34" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="270" y1="34" x2="298" y2="34" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="140" y1="84" x2="298" y2="84" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#ar)"/>
+    <!-- RDS -->
+    <rect x="870" y="26" width="200" height="60" rx="10" fill="#f4eeff" stroke="#c8b6f2"/><text x="970" y="50" text-anchor="middle" font-weight="700">AWS RDS / Aurora</text><text x="970" y="68" text-anchor="middle" fill="#5b34c4" font-size="11.5">MariaDB · PostgreSQL · Oracle</text>
+
+    <!-- EKS -->
+    <rect x="14" y="128" width="1072" height="458" rx="16" fill="#fbfcfe" stroke="#2f6fed" stroke-width="1.8" stroke-dasharray="6 4"/>
+    <text x="300" y="150" font-weight="700" fill="#2f6fed">Amazon EKS · v1.34 (Private endpoint)</text>
+
+    <!-- ingress gw -->
+    <rect x="34" y="168" width="250" height="176" rx="12" fill="#fff" stroke="#b8c6dc"/>
+    <text x="48" y="190" font-weight="700">Istio IngressGateway</text>
+    <text x="48" y="207" fill="#5b6778" font-size="11.5">서비스 도메인별 1개 · NodePort Service</text>
+    <rect x="48" y="218" width="222" height="26" rx="6" fill="#eef3fb"/><text x="58" y="236">istio-svc-a-ingressgateway</text>
+    <rect x="48" y="250" width="222" height="26" rx="6" fill="#eef3fb"/><text x="58" y="268">istio-svc-b-ingressgateway</text>
+    <rect x="48" y="282" width="222" height="26" rx="6" fill="#eef3fb"/><text x="58" y="300">istio-svc-c-ingressgateway</text>
+    <text x="48" y="328" fill="#5b6778" font-size="11.5">HPA min/max · ALB 헬스체크 /healthz/ready</text>
+
+    <!-- services -->
+    <rect x="316" y="168" width="440" height="176" rx="12" fill="#fff" stroke="#b8c6dc"/>
+    <text x="330" y="190" font-weight="700">서비스 Namespace ×13  (sidecar: istio-proxy)</text>
+    <g font-size="12">
+      <rect x="330" y="202" width="96" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="378" y="218" text-anchor="middle">service-a</text>
+      <rect x="432" y="202" width="96" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="480" y="218" text-anchor="middle">service-b</text>
+      <rect x="534" y="202" width="96" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="582" y="218" text-anchor="middle">service-c</text>
+      <rect x="636" y="202" width="108" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="690" y="218" text-anchor="middle">service-d</text>
+      <rect x="330" y="232" width="96" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="378" y="248" text-anchor="middle">service-e</text>
+      <rect x="432" y="232" width="96" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="480" y="248" text-anchor="middle">service-f</text>
+      <rect x="534" y="232" width="96" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="582" y="248" text-anchor="middle">service-g</text>
+      <rect x="636" y="232" width="108" height="24" rx="6" fill="#e6f7f4" stroke="#bfe6df"/><text x="690" y="248" text-anchor="middle">service-h …</text>
+    </g>
+    <text x="330" y="282" fill="#334155" font-size="12">• Argo Rollouts — Blue/Green (active / preview Service)</text>
+    <text x="330" y="302" fill="#334155" font-size="12">• HPA 오토스케일링 · 스토리지 EFS(RWX) PV/PVC</text>
+    <text x="330" y="322" fill="#334155" font-size="12">• OTel Operator 자동 계측 (Java / Node.js / Python)</text>
+
+    <!-- egress -->
+    <rect x="788" y="168" width="282" height="176" rx="12" fill="#fff" stroke="#b8c6dc"/>
+    <text x="802" y="190" font-weight="700">Egress 통제</text>
+    <text x="802" y="212" fill="#334155" font-size="12">• ServiceEntry 54건 (외부 API · DB · SMTP)</text>
+    <text x="802" y="232" fill="#334155" font-size="12">• resolution: DNS / MESH_INTERNAL 구분</text>
+    <text x="802" y="252" fill="#334155" font-size="12">• 외부 Public 호출 / RDS 접근 경로 명시화</text>
+    <text x="802" y="272" fill="#5b6778" font-size="11.5">outboundTrafficPolicy 는 ALLOW_ANY 유지,</text>
+    <text x="802" y="290" fill="#5b6778" font-size="11.5">ServiceEntry 로 대상 등록·관리</text>
+
+    <!-- arrows within -->
+    <line x1="284" y1="255" x2="314" y2="255" stroke="#4b5d78" stroke-width="1.8" marker-end="url(#ar)"/>
+    <line x1="756" y1="255" x2="786" y2="255" stroke="#4b5d78" stroke-width="1.8" marker-end="url(#ar)"/>
+    <line x1="970" y1="166" x2="970" y2="88" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#ar)"/>
+
+    <!-- management -->
+    <rect x="34" y="366" width="1036" height="204" rx="12" fill="#f4f8ff" stroke="#9db8ee"/>
+    <text x="48" y="388" font-weight="700" fill="#1e4fa8">Management 노드그룹 (mngr)  ·  관리 스택</text>
+    <g font-size="12.5">
+      <rect x="48" y="400" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="123" y="422" text-anchor="middle" font-weight="700">ArgoCD</text><text x="123" y="440" text-anchor="middle" fill="#5b6778" font-size="11">GitOps · Slack 알림</text>
+      <rect x="208" y="400" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="283" y="422" text-anchor="middle" font-weight="700">Argo Rollouts</text><text x="283" y="440" text-anchor="middle" fill="#5b6778" font-size="11">Blue/Green · Dashboard</text>
+      <rect x="368" y="400" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="443" y="422" text-anchor="middle" font-weight="700">Istio Control</text><text x="443" y="440" text-anchor="middle" fill="#5b6778" font-size="11">istiod · Egress · Kiali</text>
+      <rect x="528" y="400" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="603" y="422" text-anchor="middle" font-weight="700">OTel Collector</text><text x="603" y="440" text-anchor="middle" fill="#5b6778" font-size="11">Operator · HPA 2~8</text>
+      <rect x="688" y="400" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="763" y="422" text-anchor="middle" font-weight="700">Prometheus</text><text x="763" y="440" text-anchor="middle" fill="#5b6778" font-size="11">+ DB Exporter 4종</text>
+      <rect x="848" y="400" width="210" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="953" y="422" text-anchor="middle" font-weight="700">Grafana</text><text x="953" y="440" text-anchor="middle" fill="#5b6778" font-size="11">Alert-as-Code · MCP · Image Renderer</text>
+
+      <rect x="48" y="466" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="123" y="488" text-anchor="middle" font-weight="700">Loki + Promtail</text><text x="123" y="506" text-anchor="middle" fill="#5b6778" font-size="11">로그 (S3 백엔드)</text>
+      <rect x="208" y="466" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="283" y="488" text-anchor="middle" font-weight="700">Tempo</text><text x="283" y="506" text-anchor="middle" fill="#5b6778" font-size="11">분산 트레이스</text>
+      <rect x="368" y="466" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="443" y="488" text-anchor="middle" font-weight="700">n8n</text><text x="443" y="506" text-anchor="middle" fill="#5b6778" font-size="11">워크플로우 · Webhook</text>
+      <rect x="528" y="466" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="603" y="488" text-anchor="middle" font-weight="700">k6 Operator</text><text x="603" y="506" text-anchor="middle" fill="#5b6778" font-size="11">부하/웜업 테스트</text>
+      <rect x="688" y="466" width="150" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="763" y="488" text-anchor="middle" font-weight="700">K8s Dashboard</text><text x="763" y="506" text-anchor="middle" fill="#5b6778" font-size="11">조회용 / 관리자 토큰</text>
+      <rect x="848" y="466" width="210" height="54" rx="8" fill="#fff" stroke="#c5d4ee"/><text x="953" y="488" text-anchor="middle" font-weight="700">cert-manager · metrics-server</text><text x="953" y="506" text-anchor="middle" fill="#5b6778" font-size="11">EKS Add-on (Terraform)</text>
+    </g>
+    <text x="48" y="552" fill="#5b6778" font-size="11.5">※ 서비스별 노드그룹과 관리 노드그룹을 분리하여 장애·배포 영향 범위를 격리</text>
+    <!-- ALB → IngressGateway : 오른쪽 버스(x=515) → 아래(y=118) → 좌측 → 게이트웨이 상단 -->
+    <path d="M490,34 H515 V118 H159 V166" fill="none" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#ar)"/>
+    <path d="M490,84 H515" fill="none" stroke="#4b5d78" stroke-width="1.6"/>
+  </svg>
+  </div>
+  <figcaption>그림 1. 전체 구성도 (도메인, 계정, 서브넷 등 식별 정보는 생략)</figcaption>
+  </figure>
+</div></section>
+
+<!-- ===================== 3. GITOPS ===================== -->
+<section id="gitops"><div class="wrap">
+  <h2><span class="no">03</span>배포 방식 — GitOps</h2>
+  <p class="desc">Git 이 단일 진실 공급원(SSOT)입니다. 클러스터 내 변경은 ArgoCD 가 Git 과 비교·동기화하며, 배포는 Argo Rollouts 의 Blue/Green 으로 진행합니다.</p>
+
+  <figure>
+  <div class="diagram">
+  <svg viewBox="0 0 1100 330" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="13">
+    <defs><marker id="g1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4b5d78"/></marker></defs>
+    <rect x="20" y="30" width="190" height="86" rx="12" fill="#f1f5fb" stroke="#b8c6dc"/>
+    <text x="115" y="54" text-anchor="middle" font-weight="700">서비스 Git 저장소</text>
+    <text x="115" y="74" text-anchor="middle" fill="#5b6778" font-size="11.5">helm/ values-prd.yaml</text>
+    <text x="115" y="90" text-anchor="middle" fill="#5b6778" font-size="11.5">version.yaml · rollout-version.yaml</text>
+    <text x="115" y="106" text-anchor="middle" fill="#5b6778" font-size="11.5">(브랜치 prd)</text>
+
+    <rect x="20" y="200" width="190" height="86" rx="12" fill="#fff4e5" stroke="#f0c27b"/>
+    <text x="115" y="226" text-anchor="middle" font-weight="700">Jenkins</text>
+    <text x="115" y="246" text-anchor="middle" fill="#8a5a10" font-size="11.5">파라미터로 Application</text>
+    <text x="115" y="262" text-anchor="middle" fill="#8a5a10" font-size="11.5">매니페스트 생성/갱신 후 커밋</text>
+
+    <rect x="290" y="105" width="230" height="120" rx="12" fill="#fff" stroke="#2f6fed" stroke-width="1.6"/>
+    <text x="405" y="130" text-anchor="middle" font-weight="700">devops 저장소 (운영 브랜치)</text>
+    <text x="405" y="152" text-anchor="middle" fill="#334155" font-size="12">services/&lt;ns&gt;/manifests</text>
+    <text x="405" y="170" text-anchor="middle" fill="#334155" font-size="12">  project · application · namespace</text>
+    <text x="405" y="188" text-anchor="middle" fill="#334155" font-size="12">  efs-pv-pvc · setup.sh</text>
+    <text x="405" y="210" text-anchor="middle" fill="#334155" font-size="12">management/* (values + app)</text>
+
+    <rect x="600" y="105" width="190" height="120" rx="12" fill="#e8f0ff" stroke="#9db8ee"/>
+    <text x="695" y="130" text-anchor="middle" font-weight="700">ArgoCD</text>
+    <text x="695" y="152" text-anchor="middle" fill="#334155" font-size="12">AppProject (서비스별)</text>
+    <text x="695" y="170" text-anchor="middle" fill="#334155" font-size="12">Helm 차트 + values 오버라이드</text>
+    <text x="695" y="188" text-anchor="middle" fill="#334155" font-size="12">nodeSelector 주입</text>
+    <text x="695" y="206" text-anchor="middle" fill="#334155" font-size="12">HPA ignoreDifferences</text>
+
+    <rect x="870" y="30" width="210" height="100" rx="12" fill="#e6f7f4" stroke="#bfe6df"/>
+    <text x="975" y="56" text-anchor="middle" font-weight="700">Argo Rollouts</text>
+    <text x="975" y="76" text-anchor="middle" fill="#334155" font-size="12">① preview(green) 기동</text>
+    <text x="975" y="94" text-anchor="middle" fill="#334155" font-size="12">② 검증 · (k6 웜업)</text>
+    <text x="975" y="112" text-anchor="middle" fill="#334155" font-size="12">③ promote → active 전환</text>
+
+    <rect x="870" y="190" width="210" height="96" rx="12" fill="#f4eeff" stroke="#c8b6f2"/>
+    <text x="975" y="216" text-anchor="middle" font-weight="700">Slack 알림</text>
+    <text x="975" y="238" text-anchor="middle" fill="#334155" font-size="12">on-sync-failed</text>
+    <text x="975" y="256" text-anchor="middle" fill="#334155" font-size="12">on-health-degraded</text>
+    <text x="975" y="274" text-anchor="middle" fill="#334155" font-size="12">on-deployed (관리 스택)</text>
+
+    <!-- 모든 화살표는 직각 경로 / 박스 외부 통과 -->
+    <path d="M210,73 H250 V135 H288" fill="none" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#g1)"/>
+    <path d="M210,243 H250 V195 H288" fill="none" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#g1)"/>
+    <line x1="520" y1="165" x2="598" y2="165" stroke="#4b5d78" stroke-width="1.8" marker-end="url(#g1)"/>
+    <path d="M790,140 H830 V80 H868" fill="none" stroke="#4b5d78" stroke-width="1.8" marker-end="url(#g1)"/>
+    <path d="M790,190 H830 V238 H868" fill="none" stroke="#4b5d78" stroke-width="1.6" marker-end="url(#g1)"/>
+    <path d="M115,30 V14 H695 V103" fill="none" stroke="#7a8aa5" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#g1)"/>
+    <text x="300" y="36" fill="#5b6778" font-size="11.5">차트 소스 참조 (repoURL / path: helm)</text>
+  </svg>
+  </div>
+  <figcaption>그림 2. 배포 흐름 — 서비스 코드/차트와 클러스터 구성 저장소를 분리</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>서비스 Application 표준 구조</h4>
+      <ul>
+        <li>서비스 1개 = ArgoCD <code>Application</code> 1개, 차트는 <b>서비스 저장소의 <code>helm/</code></b> 를 참조</li>
+        <li><code>values-prd.yaml</code> + <code>version.yaml</code> + <code>rollout-version.yaml</code> 3개 values 로 환경·이미지·롤아웃 버전을 분리</li>
+        <li>노드그룹은 Application 의 <code>helm.values</code> 로 <code>nodeSelector.role</code> 을 주입 → 서비스 코드 변경 없이 노드 이전 가능</li>
+        <li>네임스페이스당 <code>namespace · project · application · efs-pv-pvc · setup.sh</code> 5종 세트로 표준화</li>
+        <li>HPA 의 <code>minReplicas/maxReplicas</code> 는 <code>ignoreDifferences</code> 로 운영자 변경 허용</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>관리 스택 Application 표준 구조</h4>
+      <ul>
+        <li>공식 Helm 차트(<code>prometheus</code>, <code>n8n</code>, <code>grafana</code> 등) + <b>멀티 소스</b>: 차트는 외부 레포, values 는 <code>$values/management/...</code> 로 devops 저장소에서 참조</li>
+        <li>차트 버전 고정 (예: prometheus 27.11.0, n8n 1.16.14, k6-operator 4.6.0)</li>
+        <li>values 를 용도별 파일로 분리 — <code>values-custom / values-rules / values-scrape / values-alertrule</code></li>
+        <li>Helm 차트가 없는 Oracle Exporter 는 <code>Deployment</code> 매니페스트를 <code>directory.include</code> 로 별도 Application 화</li>
+        <li>Operator 계열(Istio, ArgoCD 본체, OTel Operator)은 Git 에 파일로 두고 <code>istioctl</code> / <code>kubectl apply</code> 로 반영</li>
+      </ul>
+    </div>
+  </div>
+</div></section>
+
+<!-- ===================== 4. TRAFFIC ===================== -->
+<section id="traffic"><div class="wrap">
+  <h2><span class="no">04</span>트래픽 · 네트워크 설계</h2>
+  <p class="desc">ALB Ingress(Group) → Istio IngressGateway → 서비스. 서비스/도메인 단위로 경로를 분리했습니다.</p>
+  <div class="grid3">
+    <div class="card"><h4>ALB 구성 방식</h4>
+      <ul>
+        <li>Ingress 어노테이션으로 ALB를 선언 — <code>group.name</code>, <code>scheme</code>, <code>listen-ports</code>, <code>certificate-arn</code>(ACM 다중), <code>wafv2-acl-arn</code>, <code>ssl-policy</code></li>
+        <li>Internet-facing(WAF 연동) / Internal 분리</li>
+        <li>target-type: <b>NodePort Service → instance</b>, <b>ClusterIP → ip</b> 로 구분 적용</li>
+        <li>비용 산정용 태그(<code>Estimate</code>) 를 ALB에 부여</li>
+      </ul></div>
+    <div class="card"><h4>Istio Gateway</h4>
+      <ul>
+        <li>서비스별 IngressGateway(3종) 를 IstioOperator 로 정의</li>
+        <li>각 게이트웨이 별도 <b>HPA(min/max)</b> 및 <b>전용 노드그룹 nodeSelector</b></li>
+        <li>ALB 헬스체크 경로 <code>/healthz/ready</code> (status-port)</li>
+        <li><code>holdApplicationUntilProxyStarts</code> 로 사이드카 기동 순서 보장</li>
+      </ul></div>
+    <div class="card"><h4>리다이렉트 · 라우팅</h4>
+      <ul>
+        <li>ALB <code>actions</code> 로 구 도메인 → 신 도메인 <b>301 리다이렉트</b> (PC / 모바일)</li>
+        <li>점검 페이지(PM) 전환용 redirect 액션</li>
+        <li>호스트/경로 기반 규칙(예: 특정 path 별 백엔드), 서브도메인 session sticky</li>
+        <li>Webhook 처럼 외부 노출이 필요한 호스트만 <b>Public Ingress 로 최소 개방</b></li>
+      </ul></div>
+  </div>
+</div></section>
+
+<!-- ===================== 5. OBSERVABILITY ===================== -->
+<section id="obs"><div class="wrap">
+  <h2><span class="no">05</span>관측(Observability) · 알림</h2>
+  <p class="desc">OpenTelemetry 를 허브로 metric · trace · log 를 모으고, Grafana 알림 룰까지 YAML(Helm values)로 관리합니다.</p>
+
+  <figure>
+  <div class="diagram">
+  <svg viewBox="0 0 1100 450" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="13">
+    <defs><marker id="o1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4b5d78"/></marker></defs>
+
+    <!-- ===== 소스 (왼쪽 열) ===== -->
+    <rect x="16" y="20" width="200" height="150" rx="12" fill="#e6f7f4" stroke="#bfe6df"/>
+    <text x="116" y="46" text-anchor="middle" font-weight="700">서비스 Pod</text>
+    <text x="116" y="68" text-anchor="middle" fill="#334155" font-size="12">Java / Node.js / Python</text>
+    <text x="116" y="86" text-anchor="middle" fill="#334155" font-size="12">OTel Operator 자동 계측</text>
+    <text x="116" y="104" text-anchor="middle" fill="#334155" font-size="12">+ istio-proxy (Envoy)</text>
+    <text x="116" y="124" text-anchor="middle" fill="#5b6778" font-size="11">access log · trace</text>
+    <text x="116" y="142" text-anchor="middle" fill="#5b6778" font-size="11">metric (OTLP)</text>
+
+    <rect x="16" y="200" width="200" height="70" rx="12" fill="#f4eeff" stroke="#c8b6f2"/>
+    <text x="116" y="226" text-anchor="middle" font-weight="700">DB Exporter</text>
+    <text x="116" y="246" text-anchor="middle" fill="#334155" font-size="12">mysqld · postgres(2) · oracledb</text>
+    <text x="116" y="262" text-anchor="middle" fill="#5b6778" font-size="11">멀티타겟 /probe 방식</text>
+
+    <rect x="16" y="290" width="200" height="60" rx="12" fill="#fff4e5" stroke="#f0c27b"/>
+    <text x="116" y="316" text-anchor="middle" font-weight="700">k6 (부하 테스트)</text>
+    <text x="116" y="334" text-anchor="middle" fill="#8a5a10" font-size="11">Prometheus Remote Write</text>
+
+    <rect x="16" y="370" width="200" height="60" rx="12" fill="#f4eeff" stroke="#c8b6f2"/>
+    <text x="116" y="396" text-anchor="middle" font-weight="700">AWS CloudWatch</text>
+    <text x="116" y="414" text-anchor="middle" fill="#5b6778" font-size="11">RDS 기본 메트릭 (datasource)</text>
+
+    <!-- ===== 수집/처리 (가운데 열) ===== -->
+    <rect x="300" y="20" width="220" height="60" rx="12" fill="#fff" stroke="#b8c6dc"/>
+    <text x="410" y="46" text-anchor="middle" font-weight="700">Promtail</text>
+    <text x="410" y="64" text-anchor="middle" fill="#5b6778" font-size="11">level / service 라벨링</text>
+
+    <rect x="300" y="100" width="220" height="110" rx="12" fill="#e8f0ff" stroke="#2f6fed" stroke-width="1.5"/>
+    <text x="410" y="124" text-anchor="middle" font-weight="700">OTel Collector</text>
+    <text x="410" y="144" text-anchor="middle" fill="#334155" font-size="12">receivers: otlp (grpc / http)</text>
+    <text x="410" y="162" text-anchor="middle" fill="#334155" font-size="12">memory_limiter · k8sattributes · batch</text>
+    <text x="410" y="182" text-anchor="middle" fill="#5b6778" font-size="11">HPA 2~8 · 라벨/카디널리티 정리</text>
+    <text x="410" y="198" text-anchor="middle" fill="#5b6778" font-size="11">export interval · queue 튜닝</text>
+
+    <!-- ===== 저장소 (세 번째 열) ===== -->
+    <rect x="600" y="20" width="190" height="62" rx="12" fill="#fff" stroke="#b8c6dc"/>
+    <text x="695" y="46" text-anchor="middle" font-weight="700">Loki</text><text x="695" y="64" text-anchor="middle" fill="#5b6778" font-size="11">로그 저장 · querier 한도 튜닝</text>
+
+    <rect x="600" y="100" width="190" height="62" rx="12" fill="#fff" stroke="#b8c6dc"/>
+    <text x="695" y="126" text-anchor="middle" font-weight="700">Tempo</text><text x="695" y="144" text-anchor="middle" fill="#5b6778" font-size="11">Trace 저장 (tenant 분리)</text>
+
+    <rect x="600" y="180" width="190" height="160" rx="12" fill="#fff" stroke="#b8c6dc"/>
+    <text x="695" y="208" text-anchor="middle" font-weight="700">Prometheus</text>
+    <text x="695" y="232" text-anchor="middle" fill="#5b6778" font-size="11">Remote Write 수신 + scrape</text>
+    <text x="695" y="252" text-anchor="middle" fill="#5b6778" font-size="11">Rules: Host · Kubernetes</text>
+    <text x="695" y="268" text-anchor="middle" fill="#5b6778" font-size="11">Istio 5xx 에러율</text>
+    <text x="695" y="288" text-anchor="middle" fill="#5b6778" font-size="11">Alertmanager</text>
+
+    <!-- ===== Grafana / 알림 ===== -->
+    <rect x="870" y="20" width="214" height="290" rx="12" fill="#fff4e5" stroke="#f0c27b" stroke-width="1.5"/>
+    <text x="977" y="50" text-anchor="middle" font-weight="700">Grafana</text>
+    <text x="977" y="76" text-anchor="middle" fill="#334155" font-size="12">대시보드 · Explore</text>
+    <text x="977" y="98" text-anchor="middle" fill="#334155" font-size="12">Alert-as-Code (provisioning)</text>
+    <text x="977" y="120" text-anchor="middle" fill="#334155" font-size="12">4 그룹 · 34 룰 (EKS/RDS/DB)</text>
+    <text x="977" y="142" text-anchor="middle" fill="#334155" font-size="12">critical_level · alert_group 라벨</text>
+    <text x="977" y="164" text-anchor="middle" fill="#334155" font-size="12">Grafana MCP 서버 (PoC)</text>
+    <text x="977" y="196" text-anchor="middle" fill="#8a5a10" font-size="11">datasource</text>
+    <text x="977" y="214" text-anchor="middle" fill="#8a5a10" font-size="11">Prometheus · CloudWatch 등</text>
+
+    <rect x="870" y="350" width="214" height="80" rx="12" fill="#f4eeff" stroke="#c8b6f2"/>
+    <text x="977" y="376" text-anchor="middle" font-weight="700">알림 채널</text>
+    <text x="977" y="396" text-anchor="middle" fill="#334155" font-size="12">Slack · 메일(SMTP) · 온콜</text>
+    <text x="977" y="414" text-anchor="middle" fill="#5b6778" font-size="11">*_sync 라벨 기반 외부 연동 (Lambda)</text>
+
+    <!-- ===== 화살표: 모두 직선/직각, 박스를 가로지르지 않음 ===== -->
+    <g stroke="#4b5d78" stroke-width="1.6" fill="none" marker-end="url(#o1)">
+      <line x1="216" y1="50"  x2="298" y2="50"/>   <!-- Pod → Promtail -->
+      <line x1="216" y1="140" x2="298" y2="140"/>  <!-- Pod → Collector -->
+      <line x1="520" y1="50"  x2="598" y2="50"/>   <!-- Promtail → Loki -->
+      <line x1="520" y1="131" x2="598" y2="131"/>  <!-- Collector → Tempo -->
+      <line x1="520" y1="195" x2="598" y2="195"/>  <!-- Collector → Prometheus -->
+      <line x1="216" y1="235" x2="598" y2="235"/>  <!-- DB Exporter → Prometheus -->
+      <line x1="216" y1="320" x2="598" y2="320"/>  <!-- k6 → Prometheus -->
+      <line x1="790" y1="50"  x2="868" y2="50"/>   <!-- Loki → Grafana -->
+      <line x1="790" y1="131" x2="868" y2="131"/>  <!-- Tempo → Grafana -->
+      <line x1="790" y1="260" x2="868" y2="260"/>  <!-- Prometheus → Grafana -->
+      <path d="M216,400 H840 V300 H868"/>          <!-- CloudWatch → Grafana (하단 우회) -->
+      <line x1="977" y1="310" x2="977" y2="348"/>  <!-- Grafana → 알림 -->
+    </g>
+  </svg>
+  </div>
+  <figcaption>그림 3. 관측 파이프라인 — 수집 → 저장 → 시각화/알림</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card"><h4>Alert-as-Code (Grafana)</h4>
+      <ul>
+        <li>대시보드 UI 에서 만들던 알림 룰을 <code>values-alertrule.yaml</code> 로 이전하여 Git 으로 관리</li>
+        <li>그룹: <code>service-resource-group</code>(CPU/Memory) · <code>service-group</code>(Pod Restart, P95 Latency) · <code>aws-rds-group</code> · <code>db-group</code>(20 룰)</li>
+        <li><b>2개 EKS 클러스터</b> 대상 × Warning / Critical 단계</li>
+        <li><code>critical_level</code>(RDS=1, 리소스/Pod=2, Latency=3) 로 원인 우선순위 부여 → 연쇄 알림 억제</li>
+        <li><code>alert_group</code>, <code>*_sync</code> 라벨로 라우팅 기준 통일</li>
+      </ul></div>
+    <div class="card"><h4>DB 모니터링 확장</h4>
+      <ul>
+        <li>CloudWatch 로는 얻을 수 없는 DB 내부 지표(연결율, Running Threads, Thread Seconds 등)를 위해 Exporter 도입</li>
+        <li><b>mysqld_exporter 멀티타겟</b> — 파드 1개로 RDS 10대 probe, 타깃 추가는 scrape 목록만 수정</li>
+        <li><b>postgres_exporter</b> 2벌(일반 RDS / Aurora) — Aurora 스토리지 복제 함수 오류로 별도 분리</li>
+        <li><b>oracledb_exporter</b> — Helm 차트가 없어 Deployment 로 직접 구성</li>
+        <li>수집 주기 60s → 30s, DBA 요청서(읽기전용 계정·권한 근거) 문서화</li>
+      </ul></div>
+    <div class="card"><h4>분산 트레이싱</h4>
+      <ul>
+        <li>Istio(Envoy) 트레이싱 대상을 OTel Collector 로 지정하고 access log 의 <code>trace_id</code> 노출을 검증, Collector → Tempo 로 저장</li>
+        <li>OTel Operator <code>Instrumentation</code> CR 로 언어별(Java / Node.js / Python) 자동 계측, 언어별 파일 분리</li>
+        <li>로그의 trace_id 출처(OTel Java agent), 샘플링 정책(parentbased_traceidratio)과 수집량의 관계를 Q&amp;A 문서로 정리 (2026.09)</li>
+      </ul></div>
+    <div class="card"><h4>Prometheus 룰 · 수집</h4>
+      <ul>
+        <li>Host / Kubernetes 표준 룰 세트 + Istio 4xx·5xx 에러율 룰</li>
+        <li>ArgoCD · Alertmanager 메트릭 scrape, 노드 request/limit 적정값 산출용 수집 추가</li>
+        <li>Prometheus 볼륨 증설, CPU Steal Time 지속 조건(20분) 조정</li>
+      </ul></div>
+  </div>
+</div></section>
+
+<!-- ===================== 6. MY WORK ===================== -->
+<section id="mywork"><div class="wrap">
+  <h2><span class="no">06</span>내가 한 일 (Git 이력 기반)</h2>
+
+  <h3>역할별 정리</h3>
+  <div class="grid2">
+    <div class="card"><h4>① 배포 · 트래픽 (Argo / Istio / ALB)</h4>
+      <ul>
+        <li>Argo Rollouts 를 매니페스트 방식에서 <b>Helm 설치·관리 방식</b>으로 전환, 대시보드 Ingress 및 네임스페이스 조회용 ClusterRole 구성</li>
+        <li>서비스 도메인별 <b>Istio IngressGateway + ALB Ingress</b> 신규 구성 (3개 서비스), 외부·내부 ALB 분리</li>
+        <li>WAF·ACM 인증서·TLS 1.3 정책 반영, 서브도메인 session sticky, 비용 산정 태그</li>
+        <li>ServiceEntry 체계 정비 (resolution DNS / MESH_INTERNAL, 미사용 DB 정리, SMTP TLS) 및 신규 대상 일괄 등록</li>
+        <li>서비스 신규 온보딩: 다수 서비스(배치·백오피스·파트너 등 하위 구성 포함)의 Application · PV/PVC · AppProject 작성</li>
+        <li>13개 서비스 <code>setup.sh</code> 표준화 (namespace 선생성, PV/PVC 환경변수 매핑)</li>
+      </ul></div>
+    <div class="card"><h4>② 관측 (OTel / Prometheus / Loki / Grafana)</h4>
+      <ul>
+        <li>Istio 트레이싱 설정(OTel/Envoy)과 access log 포맷 변경, <code>trace_id</code> 노출 검증</li>
+        <li>OTel Collector 메트릭 라벨을 수차례 실험하며 <b>불필요/중복 라벨 제거 (카디널리티 축소)</b></li>
+        <li>언어별 자동 계측 설정(Java / Node.js / Python) 정리, Python 메트릭 export 옵션 통일</li>
+        <li>Loki Promtail <code>level</code> / <code>service</code> 라벨링, querier·query series 한도 조정</li>
+        <li>Grafana 알림 룰 <b>Alert-as-Code 이전</b> 및 임계치·그룹·라벨 체계 설계 (34 룰)</li>
+        <li>DB Exporter 4종(mysqld / postgres 2 / oracledb) 도입 + DB 알림 20룰 활성화</li>
+        <li>Grafana MCP 서버 PoC, Alertmanager 지표 scrape, Istio 5xx 룰 추가</li>
+      </ul></div>
+    <div class="card"><h4>③ 클러스터 운영 · 인프라</h4>
+      <ul>
+        <li><b>EKS 1.32 → 1.34 업그레이드</b> (Terraform + 노드그룹 교체 + Add-on 갱신 + 전 컴포넌트 nodeSelector 이전)</li>
+        <li><code>nodeSelector</code> 체계 도입 — 관리/서비스 컴포넌트를 노드그룹별로 격리</li>
+        <li>노드 스토리지 증설(80GB 노드그룹) 대응 전 서비스 반영</li>
+        <li>OTel Operator 이미지 레지스트리 변경 대응(<code>kube-rbac-proxy</code>), Grafana 플러그인 자동 업그레이드 방지</li>
+        <li>사용하지 않는 서비스/설정/폴더 정리 (예: 한 번에 1,456 줄 삭제한 저장소 정합성 작업)</li>
+      </ul></div>
+    <div class="card"><h4>④ 자동화 · 문서화 · 품질</h4>
+      <ul>
+        <li><b>Jenkins 연동</b>: 파라미터 기반으로 ArgoCD Application 매니페스트가 devops 저장소에 자동 생성되도록 샘플 서비스 구성 및 파라미터 정합</li>
+        <li>HPA 변경 허용을 위한 <code>ignoreDifferences</code> 도입 및 <code>syncPolicy(RespectIgnoreDifferences)</code> 검증</li>
+        <li><b>k6 Operator</b> 구성, Grafana K6 대시보드, 개발팀 인수인계 문서 작성</li>
+        <li>노드그룹 교체 런북, 트레이싱 Q&amp;A, RDS 임계치·Exporter 도입 계획서, DBA 계정 요청서 작성</li>
+        <li>알림 룰 변경 시 <b>임시 임계치로 알림 흐름 테스트 후 원복</b>하는 검증 절차 수행</li>
+      </ul></div>
+  </div>
+
+</div></section>
+
+<!-- ===================== 7. STACK ===================== -->
+<section id="stack"><div class="wrap">
+  <h2><span class="no">07</span>기술 스택</h2>
+  <div class="card">
+    <p><span class="tag">AWS EKS 1.34</span><span class="tag">EC2 (m7i)</span><span class="tag">ALB / WAF / ACM</span><span class="tag">EFS · EBS(gp2)</span><span class="tag">RDS · Aurora</span><span class="tag">CloudWatch</span><span class="tag">S3 (Loki)</span><span class="tag">IAM · IRSA</span></p>
+    <p><span class="tag g">Terraform</span><span class="tag g">Helm</span><span class="tag g">ArgoCD</span><span class="tag g">Argo Rollouts</span><span class="tag g">Jenkins</span><span class="tag g">Git (GitOps)</span><span class="tag g">Shell / PowerShell</span></p>
+    <p><span class="tag">Istio (Ingress / Egress / ServiceEntry)</span><span class="tag">Kiali</span><span class="tag">cert-manager</span><span class="tag">metrics-server</span><span class="tag">HPA</span></p>
+    <p><span class="tag p">OpenTelemetry (Operator / Collector)</span><span class="tag p">Prometheus</span><span class="tag p">Grafana</span><span class="tag p">Loki · Promtail</span><span class="tag p">Tempo</span><span class="tag p">mysqld / postgres / oracledb exporter</span></p>
+    <p><span class="tag o">n8n</span><span class="tag o">Slack</span></p>
+  </div>
+</div></section>
+</main><aside class="related-projects wrap" aria-label="다른 프로젝트"><p class="kicker">CONTINUE EXPLORING</p><h2>다른 프로젝트 살펴보기</h2><div class="related-grid"><a href="oncall.html"><span>RELIABILITY & AUTOMATION</span><b>OnCall 자동 알림 시스템 ↗</b></a><a href="litellm.html"><span>AI INFRASTRUCTURE</span><b>Enterprise LLM Gateway 운영 ↗</b></a></div></aside><footer class="site-footer"><div class="wrap footer-row"><div><b>장순돌 · SoonDol Jang</b><p>서비스 개발에서 클라우드 운영까지.</p></div><div class="footer-links"><a href="../index.html">포트폴리오 홈</a><a href="https://github.com/sdjang6253" target="_blank" rel="noopener noreferrer">GitHub ↗</a><a href="https://chingdong.tistory.com/" target="_blank" rel="noopener noreferrer">개인 블로그 ↗</a><a href="#top">맨 위로 ↑</a></div></div></footer></body></html>

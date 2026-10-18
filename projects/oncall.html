@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="장순돌의 클라우드 인프라 및 SRE 포트폴리오. EKS GitOps, 온콜 자동화, LLM Gateway 운영 경험."><title>OnCall 자동 알림 시스템 · 장순돌</title><link rel="stylesheet" href="../assets/oncall.css"><link rel="stylesheet" href="../assets/site.css"><script src="../assets/site.js" defer></script></head><body id="top" class="project-page project-oncall"><a class="skip-link" href="#main-content">본문으로 이동</a><nav class="site-nav" aria-label="주요 메뉴"><div class="site-nav-inner"><a class="identity" href="../index.html"><span class="identity-mark" aria-hidden="true">SJ</span><span>장순돌<span class="identity-sub">ENGINEERING PORTFOLIO</span></span></a><div class="site-links"><a href="../index.html">홈</a><a href="../projects/eks.html">EKS / GitOps</a><a aria-current="page" href="../projects/oncall.html">OnCall</a><a href="../projects/litellm.html">LLM Gateway</a></div></div></nav>
+
+<header class="hero"><div class="wrap"><a class="back-link" href="../index.html#projects">← 전체 프로젝트</a><div class="eyebrow">PROJECT 02 / RELIABILITY & AUTOMATION</div><h1>OnCall 자동 알림 시스템</h1><p class="lead">Grafana 장애 알림을 받아 담당자에게 <b>전화(한국어 TTS)</b>와 <b>메신저(Naver Works)</b>를 자동으로 발송하고,
+      통화 응답 여부·알림 이력·AI 이슈 요약을 <b>웹 대시보드</b>로 관리하는 서버리스 + EKS 기반 온콜 플랫폼.</p><div class="project-tags"><span>AWS Lambda</span><span>Amazon Connect</span><span>DynamoDB</span><span>FastAPI</span><span>n8n</span></div><div class="project-meta"><div><span>기간</span><b>2026.06 — 현재</b></div><div><span>역할</span><b>기획·설계·개발·배포·운영 (1인)</b></div><div><span>환경</span><b>AWS 서버리스 · EKS</b></div></div></div><div class="wrap extra-meta">구성: 알림 Lambda 2종 + 대시보드(EKS)</div></header>
+
+<nav class="toc" aria-label="프로젝트 목차">
+  <div class="wrap">
+    <a href="#background">배경</a>
+    <a href="#architecture">아키텍처</a>
+    <a href="#flow">알림 처리 흐름</a>
+    <a href="#calllog">통화 이력 적재</a>
+    <a href="#data">데이터 모델</a>
+    <a href="#dashboard">대시보드</a>
+    <a href="#ai">AI 이슈 요약</a>
+    <a href="#ops">현재 운영 방식</a>
+    <a href="#mywork">수행 내용</a>
+  </div>
+</nav>
+
+<main id="main-content" class="wrap">
+
+<!-- 1 -->
+<section id="background">
+  <h2><span class="no">01</span>배경 / 개요</h2>
+  <p class="sub">기존에는 Grafana 알림이 Slack과 Naver Works 단체방으로만 전달되었습니다.</p>
+  <div class="grid2">
+    <div class="card">
+      <h4>AS-IS</h4>
+      <p>Grafana Alert Rule → Slack <code>#alert</code> 채널 / edutech-api(사내 서비스) → Naver Works 단체방</p>
+      <ul>
+        <li>채팅방 기반이라 야간·휴일에 담당자가 즉시 인지하기 어려움</li>
+        <li>누가 알림을 확인했는지, 어떤 알림이 있었는지 이력 관리 수단 부재</li>
+        <li>서비스별 담당자 구분 없이 전체 방에 일괄 전달</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>TO-BE</h4>
+      <p>기존 경로(Slack · 단체방)는 그대로 유지하고, <b>온콜 경로(전화 + 개인 메시지)</b>를 병렬로 추가</p>
+      <ul>
+        <li>서비스 → 그룹 → 담당자 자동 라우팅</li>
+        <li>critical 알림은 담당자에게 전화, 전체는 개인 메신저로 전달</li>
+        <li>통화 응답 여부 / 발신 멘트 / 알림 이력을 DynamoDB에 적재하고 대시보드로 조회</li>
+      </ul>
+    </div>
+  </div>
+  <div class="grid2" style="margin-top:16px">
+    <figure><img src="../assets/oncall/architecture-asis.png" alt="AS-IS 아키텍처"><figcaption>AS-IS — Grafana → Slack / Naver Works 단체방</figcaption></figure>
+    <figure><img src="../assets/oncall/architecture-tobe.png" alt="TO-BE 아키텍처"><figcaption>TO-BE — 기존 경로 유지 + 신규 온콜 경로(전화 · 개인 메시지) 추가</figcaption></figure>
+  </div>
+</section>
+
+<!-- 2 -->
+<section id="architecture">
+  <h2><span class="no">02</span>전체 아키텍처</h2>
+  <p class="sub">알림 처리(서버리스) · 이력 적재(이벤트 스트림) · 관리 대시보드(EKS) 3개 영역으로 분리했습니다.</p>
+
+  <div class="card" style="padding:26px">
+<figure class="inline-diagram"><div class="diagram"><svg viewBox="0 0 960 500" width="100%" role="img" aria-label="시스템 구성도" style="font-family:inherit">
+  <defs>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#ea580c"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#2563eb"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#16a34a"/></marker>
+    <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7c3aed"/></marker>
+  </defs>
+  <style>
+    .bx{fill:#fff;stroke:#d1d5db;stroke-width:1.4}
+    .t{font-size:13px;font-weight:700;fill:#1f2937;text-anchor:middle}
+    .s{font-size:11px;fill:#6b7280;text-anchor:middle}
+    .l{font-size:11px;fill:#6b7280}
+    .zone{fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+  </style>
+
+  <!-- zones -->
+  <rect class="zone" x="170" y="25" width="500" height="345" rx="14" stroke="#ea580c"/>
+  <text x="184" y="46" style="font-size:12px;font-weight:700;fill:#ea580c">AWS · ap-northeast-2 (알림 처리 / 이력 적재)</text>
+  <rect class="zone" x="170" y="395" width="780" height="95" rx="14" stroke="#7c3aed"/>
+  <text x="184" y="415" style="font-size:12px;font-weight:700;fill:#7c3aed">EKS · 관리 대시보드</text>
+
+  <!-- nodes -->
+  <rect class="bx" x="20" y="120" width="110" height="70" rx="10"/>
+  <text class="t" x="75" y="152">Grafana</text><text class="s" x="75" y="170">Alert Rule</text>
+
+  <rect class="bx" x="200" y="110" width="130" height="80" rx="10" style="stroke:#ea580c"/>
+  <text class="t" x="265" y="140">알림 Lambda</text><text class="s" x="265" y="158">라우팅 · 판정 · 발신</text><text class="s" x="265" y="173">(Function URL)</text>
+
+  <rect class="bx" x="400" y="60" width="130" height="64" rx="10"/>
+  <text class="t" x="465" y="90">Amazon Connect</text><text class="s" x="465" y="108">한국어 TTS 발신</text>
+
+  <rect class="bx" x="780" y="60" width="150" height="64" rx="10"/>
+  <text class="t" x="855" y="90">온콜 담당자</text><text class="s" x="855" y="108">전화 (PSTN)</text>
+
+  <rect class="bx" x="560" y="170" width="110" height="56" rx="10"/>
+  <text class="t" x="615" y="196">edutech-api</text><text class="s" x="615" y="213">사내 서비스</text>
+
+  <rect class="bx" x="780" y="170" width="150" height="56" rx="10"/>
+  <text class="t" x="855" y="193">Naver Works</text><text class="s" x="855" y="210">개인 DM + 단체방(멘션)</text>
+
+  <rect class="bx" x="200" y="250" width="130" height="64" rx="10" style="stroke:#2563eb"/>
+  <text class="t" x="265" y="278">DynamoDB</text><text class="s" x="265" y="296">user · groups · call_log</text>
+
+  <rect class="bx" x="400" y="290" width="130" height="64" rx="10" style="stroke:#2563eb"/>
+  <text class="t" x="465" y="318">Kinesis → Lambda</text><text class="s" x="465" y="336">CTR 컨슈머</text>
+
+  <rect class="bx" x="560" y="270" width="110" height="56" rx="10" style="stroke:#9ca3af"/>
+  <text class="t" x="615" y="295">n8n · AI Agent</text><text class="s" x="615" y="312">이슈 원인 분석</text>
+
+  <rect class="bx" x="200" y="435" width="150" height="46" rx="10" style="stroke:#7c3aed"/>
+  <text class="t" x="275" y="456">FastAPI Pod</text><text class="s" x="275" y="472">API + 정적 프론트</text>
+  <rect class="bx" x="450" y="435" width="130" height="46" rx="10"/>
+  <text class="t" x="515" y="456">Grafana API</text><text class="s" x="515" y="472">알림 규칙 조회</text>
+  <rect class="bx" x="740" y="435" width="190" height="46" rx="10"/>
+  <text class="t" x="835" y="456">관리자 브라우저</text><text class="s" x="835" y="472">Istio Ingress · HTTPS</text>
+
+  <!-- edges -->
+  <path d="M130 155 L200 150" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#ao)"/>
+  <text class="l" x="128" y="140">Webhook</text>
+  <path d="M330 130 L400 92" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#ao)"/>
+  <text class="l" x="345" y="100">발신</text>
+  <path d="M530 92 L780 92" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#ab)"/>
+  <text class="l" x="625" y="84">전화</text>
+  <path d="M330 175 L560 198" stroke="#6b7280" stroke-width="1.6" fill="none" marker-end="url(#ao)"/>
+  <text class="l" x="345" y="205">개인/단체방 요청</text>
+  <path d="M670 198 L780 198" stroke="#16a34a" stroke-width="2" fill="none" marker-end="url(#ag)"/>
+  <path d="M265 190 L265 250" stroke="#6b7280" stroke-width="1.6" fill="none" marker-end="url(#ab)"/>
+  <text class="l" x="272" y="228">라우팅 조회 · 이력 선기록</text>
+  <path d="M465 124 L465 290" stroke="#2563eb" stroke-width="1.6" fill="none" stroke-dasharray="5 3" marker-end="url(#ab)"/>
+  <text class="l" x="472" y="150">통화종료 CTR</text>
+  <path d="M400 322 L330 295" stroke="#2563eb" stroke-width="1.8" fill="none" marker-end="url(#ab)"/>
+  <text class="l" x="338" y="338">응답상태 갱신</text>
+  <path d="M235 435 L235 314" stroke="#7c3aed" stroke-width="1.8" fill="none" marker-end="url(#ap)"/>
+  <text class="l" x="243" y="380" style="fill:#7c3aed">IRSA 조회 · 관리 쓰기</text>
+  <path d="M350 458 L450 458" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#ap)"/>
+  <text class="l" x="600" y="420" style="fill:#7c3aed">관리자 → FastAPI (HTTPS)</text>
+  <path d="M835 435 Q 835 410 600 410 Q 300 410 300 435" stroke="#7c3aed" stroke-width="1.4" fill="none" stroke-dasharray="4 3" marker-end="url(#ap)"/>
+  <path d="M330 160 Q 450 230 560 285" stroke="#9ca3af" stroke-width="1.4" fill="none" stroke-dasharray="4 3" marker-end="url(#ab)"/>
+  <text class="l" x="400" y="262" style="fill:#6b7280">AI 분석 요청</text>
+  <path d="M560 312 L530 322" stroke="#9ca3af" stroke-width="1.4" fill="none" stroke-dasharray="4 3" marker-end="url(#ab)"/>
+</svg></div></figure>
+    <p style="margin-top:10px;font-size:13px;color:var(--muted);text-align:center">※ 상세 아키텍처 이미지는 위 TO-BE 다이어그램, 통화 이력 적재 흐름은 4장을 참고.</p>
+  </div>
+
+  <h3>구성 요소</h3>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="상세 정보 표"><table>
+    <tr><th style="width:190px">구성 요소</th><th>역할</th></tr>
+    <tr><td><b>알림 Lambda</b><br><span class="badge b-or">Python</span></td><td>Grafana Webhook 수신(시크릿 헤더 인증) → 서비스·그룹·담당자 라우팅 → Works 발송 → 전화 발신 여부 판정 → Amazon Connect 발신 → 이력 선기록</td></tr>
+    <tr><td><b>Amazon Connect</b></td><td>API 기반 아웃바운드 호출(<code>StartOutboundVoiceContact</code>) + 한국어 TTS(Seoyeon). 한글 발음 사전으로 서비스명/영문 알림명을 읽기 좋게 변환</td></tr>
+    <tr><td><b>Kinesis + CTR 컨슈머 Lambda</b></td><td>통화 종료 시 CTR(Contact Trace Record)을 실시간 스트리밍으로 수신하여 <code>ANSWERED / NO_ANSWER / BUSY / FAILED</code> 판정 및 이력 갱신</td></tr>
+    <tr><td><b>DynamoDB</b> (3 테이블)</td><td>담당자(<code>oncall_user</code>), 서비스→그룹 매핑 + 킬스위치(<code>oncall_service_groups</code>), 통화/알림/감사 이력(<code>oncall_call_log</code>)</td></tr>
+    <tr><td><b>edutech-api 연동</b></td><td>사내 서비스를 경유한 Naver Works 개인 메시지 + 단체방(담당자 @멘션) 발송</td></tr>
+    <tr><td><b>n8n + AI Agent</b></td><td>critical 발신 시 비동기로 원인 분석 요청 → 결과를 콜백으로 수신해 이력에 반영</td></tr>
+    <tr><td><b>OnCall Dashboard</b><br><span class="badge b-pu">EKS</span></td><td>FastAPI + 바닐라 ES 모듈 웹 서비스. 이력/KPI 시각화, 담당자·그룹 관리, 킬스위치, 감사 로그, Grafana 규칙 조회</td></tr>
+  </table></div>
+</section>
+
+<!-- 3 -->
+<section id="flow">
+  <h2><span class="no">03</span>알림 처리 흐름</h2>
+  <p class="sub">Grafana 알림 1건이 들어오면 Lambda가 아래 순서로 판정·처리합니다.</p>
+
+  <div class="flow">
+    <div class="step"><div class="n">1</div><b>Webhook 인증</b><span>시크릿 불일치 시 401, 처리 중단</span></div>
+    <div class="step"><div class="n">2</div><b>Payload 파싱</b><span>firing / resolved 판정</span></div>
+    <div class="step"><div class="n">3</div><b>수신자 집계</b><span>서비스→그룹→담당자, 1인 1통으로 병합</span></div>
+    <div class="step"><div class="n">4</div><b>Works 발송</b><span>단체방(멘션) 1건 + 담당 알림만 필터링한 개인 DM</span></div>
+    <div class="step"><div class="n">5</div><b>전화 판정</b><span>아래 5단계 게이트</span></div>
+    <div class="step go"><div class="n">6</div><b>발신 + 이력</b><span>TTS 발신 후 PENDING 선기록</span></div>
+  </div>
+
+  <h3>전화 발신 판정 — 우선순위 게이트</h3>
+  <p class="sub" style="margin-bottom:12px">모든 게이트를 순서대로 통과해야만 전화가 나가며, 막힌 경우에도 Works 발송과 이력(<code>WORKS_ONLY</code>)은 반드시 남깁니다.</p>
+  <div class="gate">
+    <div class="g"><div class="k">1</div><div><b>전역 킬스위치</b><small>대형 장애 시 관리자가 전화만 전면 중단. 재개 시각 지정 시 자동 복귀, 미지정 시 수동 해제까지 유지 (severity보다 우선)</small></div></div>
+    <div class="g"><div class="k">2</div><div><b>알람이 firing 상태인가</b><small>해소(resolved) 알림은 Works로만 안내</small></div></div>
+    <div class="g"><div class="k">3</div><div><b>severity = critical</b><small>담당자 알림 중 하나라도 critical이면 승격, warning만 있으면 Works 전용</small></div></div>
+    <div class="g"><div class="k">4</div><div><b>업무시간 억제 정책</b><small>설정으로 on/off 가능 (KST 기준 시간대)</small></div></div>
+    <div class="g"><div class="k">5</div><div><b>중복 통화 억제 (10분)</b><small>같은 번호 최근 실통화 이력을 DynamoDB GSI로 조회 — 콜드스타트와 무관하게 정확</small></div></div>
+    <div class="g ok"><div class="k">✓</div><div><b>전화 발신</b><small>Amazon Connect 한국어 TTS → 담당자</small></div></div>
+  </div>
+
+  <h3>주요 설계 포인트</h3>
+  <div class="grid2">
+    <div class="card"><h4>1인 1통 집계</h4><p>여러 알림이 동시에 와도 수신자 기준으로 병합. 여러 서비스를 담당하는 사람에게는 한 통의 전화에서 모든 서비스를 안내합니다.</p></div>
+    <div class="card"><h4>fail-open / fail-safe 구분</h4><p>DynamoDB 조회 실패 시에는 알림이 끊기지 않도록 <b>fail-open</b>, 재개 시각 파싱 오류처럼 판단이 모호한 경우는 전화를 막는 쪽으로 <b>fail-safe</b> 처리했습니다.</p></div>
+    <div class="card"><h4>알림 단위 생명주기 추적</h4><p>fingerprint 단위로 firing → resolved 전이를 기록하여 알림의 발생·해소 시각을 이력화했습니다.</p></div>
+    <div class="card"><h4>데이터 기반 라우팅</h4><p>담당자·서비스 매핑을 코드 하드코딩에서 DynamoDB로 이관하여 재배포 없이 대시보드에서 변경할 수 있게 했습니다.</p></div>
+  </div>
+</section>
+
+<!-- 4 -->
+<section id="calllog">
+  <h2><span class="no">04</span>통화 이력 적재 메커니즘</h2>
+  <p class="sub">“전화를 받았는가?”를 확정적으로 판별하기 위해 Connect CTR을 Kinesis로 스트리밍합니다.</p>
+  <div class="card" style="padding:22px">
+<figure class="inline-diagram"><div class="diagram"><svg viewBox="0 0 1000 300" width="100%" role="img" aria-label="통화 이력 적재 메커니즘" style="font-family:inherit">
+  <defs>
+    <marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#4b5563"/></marker>
+    <marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#2563eb"/></marker>
+  </defs>
+  <style>
+    .bx{fill:#fff;stroke:#d1d5db;stroke-width:1.4}
+    .t{font-size:13px;font-weight:700;fill:#1f2937;text-anchor:middle}
+    .s{font-size:11px;fill:#6b7280;text-anchor:middle}
+  </style>
+  <rect class="bx" x="20" y="130" width="120" height="70" rx="10"/>
+  <rect x="20" y="130" width="120" height="6" rx="3" fill="#ea580c"/>
+  <text class="t" x="80" y="162">알림 Lambda</text>
+  <text class="s" x="80" y="182">온콜 발신</text>
+  <rect class="bx" x="188" y="130" width="120" height="70" rx="10"/>
+  <rect x="188" y="130" width="120" height="6" rx="3" fill="#4f46e5"/>
+  <text class="t" x="248" y="162">Amazon Connect</text>
+  <text class="s" x="248" y="182">전화 (TTS)</text>
+  <rect class="bx" x="356" y="130" width="120" height="70" rx="10"/>
+  <rect x="356" y="130" width="120" height="6" rx="3" fill="#7c3aed"/>
+  <text class="t" x="416" y="162">Kinesis</text>
+  <text class="s" x="416" y="182">oncall_ctr_stream</text>
+  <rect class="bx" x="524" y="130" width="120" height="70" rx="10"/>
+  <rect x="524" y="130" width="120" height="6" rx="3" fill="#ea580c"/>
+  <text class="t" x="584" y="162">CTR 컨슈머</text>
+  <text class="s" x="584" y="182">Lambda</text>
+  <rect class="bx" x="692" y="130" width="120" height="70" rx="10"/>
+  <rect x="692" y="130" width="120" height="6" rx="3" fill="#2563eb"/>
+  <text class="t" x="752" y="162">DynamoDB</text>
+  <text class="s" x="752" y="182">oncall_call_log</text>
+  <rect class="bx" x="860" y="130" width="120" height="70" rx="10"/>
+  <rect x="860" y="130" width="120" height="6" rx="3" fill="#16a34a"/>
+  <text class="t" x="920" y="162">Dashboard</text>
+  <text class="s" x="920" y="182">EKS · 조회 전용</text>
+
+  <!-- 담당자 -->
+  <rect class="bx" x="188" y="22" width="120" height="44" rx="10"/>
+  <text class="t" x="248" y="49">온콜 담당자</text>
+
+  <!-- 화살표 -->
+  <path d="M140 165 H188" stroke="#4b5563" stroke-width="2" fill="none" marker-end="url(#m1)"/>
+  <path d="M308 165 H356" stroke="#4b5563" stroke-width="2" fill="none" marker-end="url(#m1)"/>
+  <path d="M476 165 H524" stroke="#4b5563" stroke-width="2" fill="none" marker-end="url(#m1)"/>
+  <path d="M644 165 H692" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#m2)"/>
+  <path d="M812 165 H860" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#m1)"/>
+  <path d="M248 130 V68" stroke="#4b5563" stroke-width="2" fill="none" marker-end="url(#m1)"/>
+  <path d="M80 200 V262 H752 V204" stroke="#2563eb" stroke-width="2" stroke-dasharray="6 4" fill="none" marker-end="url(#m2)"/>
+
+  <!-- 번호 뱃지 (화살표 위) -->
+  <circle cx="164" cy="165" r="11" fill="#ea580c" stroke="#fff" stroke-width="2"/>
+  <text x="164" y="169" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">1</text>
+  <circle cx="332" cy="165" r="11" fill="#4b5563" stroke="#fff" stroke-width="2"/>
+  <text x="332" y="169" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">4</text>
+  <circle cx="500" cy="165" r="11" fill="#4b5563" stroke="#fff" stroke-width="2"/>
+  <text x="500" y="169" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">5</text>
+  <circle cx="668" cy="165" r="11" fill="#2563eb" stroke="#fff" stroke-width="2"/>
+  <text x="668" y="169" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">6</text>
+  <circle cx="836" cy="165" r="11" fill="#7c3aed" stroke="#fff" stroke-width="2"/>
+  <text x="836" y="169" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">7</text>
+  <circle cx="248" cy="99" r="11" fill="#4b5563" stroke="#fff" stroke-width="2"/>
+  <text x="248" y="103" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">2</text>
+  <circle cx="416" cy="262" r="11" fill="#2563eb" stroke="#fff" stroke-width="2"/>
+  <text x="416" y="266" text-anchor="middle" style="font-size:12px;font-weight:700;fill:#fff">3</text>
+</svg></div></figure>
+    <div class="grid3" style="margin-top:18px">
+      <div class="card"><h4><span class="badge b-or">1</span> 발신 요청</h4><p>알림 Lambda가 Amazon Connect에 전화 발신을 요청합니다.</p></div>
+      <div class="card"><h4><span class="badge b-bl">2</span> 전화 연결</h4><p>Connect가 온콜 담당자에게 실제 통화를 연결합니다.</p></div>
+      <div class="card"><h4><span class="badge b-bl">3</span> PENDING 선기록</h4><p>발신 즉시 DynamoDB에 PENDING 상태로 선기록합니다 (PutItem).</p></div>
+      <div class="card"><h4><span class="badge b-bl">4</span> 통화 종료 CTR</h4><p>통화가 끝나면 응답 여부가 담긴 CTR이 Kinesis로 발행됩니다.</p></div>
+      <div class="card"><h4><span class="badge b-bl">5·6</span> 판정 및 갱신</h4><p>CTR 컨슈머 Lambda가 응답/미응답을 판정해 이력 상태를 갱신합니다.</p></div>
+      <div class="card"><h4><span class="badge b-pu">7</span> 대시보드 조회</h4><p>대시보드는 DynamoDB만 조회합니다.</p></div>
+    </div>  </div>
+
+  <h3>기술 선택 배경</h3>
+  <div class="grid2">
+    <div class="card"><h4>검토했으나 제외한 방식</h4><p><code>CheckOutboundCallStatus</code> 블록은 캠페인 전용이라 단건 API 발신에는 적용할 수 없음을 확인했습니다. 폴링 방식은 지연·누락 위험이 있어 제외했습니다.</p></div>
+    <div class="card"><h4>채택한 방식</h4><p>CTR의 <code>ConnectedToSystemTimestamp</code> 유무와 <code>DisconnectReason</code>으로 응답 여부를 판정하고, Kinesis 이벤트 기반으로 즉시 반영합니다.</p></div>
+  </div>
+
+  <h3>call_status 판정 규칙</h3>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="상세 정보 표"><table>
+    <tr><th style="width:160px">상태</th><th>조건</th></tr>
+    <tr><td><span class="badge b-bl">PENDING</span></td><td>발신 직후 선기록, CTR 도착 전</td></tr>
+    <tr><td><span class="badge b-gr">ANSWERED</span></td><td>CTR에 고객 단말 응답 시각 존재</td></tr>
+    <tr><td><span class="badge b-rd">NO_ANSWER</span></td><td>응답 없음 + 타임아웃/취소/미응답 계열 사유</td></tr>
+    <tr><td><span class="badge b-or">BUSY / FAILED</span></td><td>통화중 / 번호 오류·차단 등</td></tr>
+    <tr><td><span class="badge b-pu">WORKS_ONLY</span></td><td>전화 미발신(warning, 해소, 킬스위치, 억제 등) — Works만 발송</td></tr>
+  </table></div>
+</section>
+
+<!-- 5 -->
+<section id="data">
+  <h2><span class="no">05</span>데이터 모델 (DynamoDB)</h2>
+  <p class="sub">테이블 수를 최소화하기 위해 PK 접두어(네임스페이스)로 엔티티를 구분했습니다.</p>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="상세 정보 표"><table>
+    <tr><th style="width:210px">테이블</th><th>PK 네임스페이스</th><th>용도</th></tr>
+    <tr><td><code>oncall_user</code></td><td><code>PERSON#&lt;전화&gt;</code></td><td>담당자(이름·이메일·담당 그룹·활성 여부·사번)</td></tr>
+    <tr><td><code>oncall_service_groups</code></td><td><code>SERVICE#&lt;서비스&gt;</code><br><code>SYSTEM#KILL_SWITCH</code></td><td>서비스→그룹 매핑 / 시스템 설정(킬스위치)</td></tr>
+    <tr><td rowspan="4"><code>oncall_call_log</code><br><span style="color:var(--muted);font-size:12px">GSI: phone_index, call_status_index</span></td><td><code>CONTACT#</code></td><td>전화 연결 이력</td></tr>
+    <tr><td><code>NOTIFY#</code></td><td>Works 전용 알림 이력</td></tr>
+    <tr><td><code>ALERT#</code></td><td>알림 이벤트 단위 생명주기 + AI 요약</td></tr>
+    <tr><td><code>AUDIT#</code></td><td>관리자 활동 감사 로그</td></tr>
+  </table></div>
+  <div class="grid3" style="margin-top:16px">
+    <div class="card"><h4>단일 테이블 다중 엔티티</h4><p>신규 테이블 생성을 지양하는 환경 제약 속에서, 킬스위치·감사로그를 기존 테이블에 접두어로 수용했습니다.</p></div>
+    <div class="card"><h4>GSI 활용</h4><p>전화번호별 최근 이력(통화 억제), 상태별 조회(미응답 목록)를 GSI로 처리합니다.</p></div>
+    <div class="card"><h4>On-Demand 과금</h4><p>알림 발생 패턴이 불규칙하므로 PAY_PER_REQUEST를 사용합니다.</p></div>
+  </div>
+</section>
+
+<!-- 6 -->
+<section id="dashboard">
+  <h2><span class="no">06</span>OnCall Dashboard</h2>
+  <p class="sub">기존 단일 HTML 대시보드를 FastAPI 기반 독립 웹 서비스로 전환하여 EKS에 배포했습니다.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>기능</h4>
+      <ul>
+        <li><b>대시보드</b> — KPI(수신율 등), 그룹별/시간대별 차트, Oncall 이력, Alert 이력</li>
+        <li><b>Alert 규칙</b> — Grafana 규칙 실시간 조회(critical_level 기준 정렬)</li>
+        <li><b>Oncall 담당자</b> — CRUD</li>
+        <li><b>관리</b> — 서비스 그룹 관리, 수기 발송, 킬스위치(“OnCall 시스템 일시 중단”), 관리자 로그</li>
+        <li><b>AI 이슈 요약</b> — 증상 / 원인 / 조치 결과 모달</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>기술 / 보안</h4>
+      <ul>
+        <li>FastAPI + boto3, 프론트는 <b>빌드리스 ES 모듈</b>(서버측 partial include 조립)</li>
+        <li><b>IRSA</b>로 DynamoDB 접근 — 컨테이너에 장기 키를 두지 않음</li>
+        <li>서버측 <b>PII 마스킹</b>(이름·전화), 마스킹 해제는 로그인 필수</li>
+        <li>HMAC 서명 세션 토큰, 쓰기 API 인증, 모든 변경 <b>감사 로그</b></li>
+        <li>JSON 구조화 로깅 + W3C trace 컨텍스트</li>
+        <li>Liveness(<code>/healthz</code>) / Readiness(<code>/api/health</code>) 분리</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>배포 파이프라인</h3>
+  <div class="flow">
+    <div class="step"><div class="n">1</div><b>Docker 빌드</b><span>비루트(uid 10001) 이미지, 태그 <code>yyyyMMddHH-mmss</code></span></div>
+    <div class="step"><div class="n">2</div><b>컨테이너 검증</b><span>HTML/API 응답 확인</span></div>
+    <div class="step"><div class="n">3</div><b>ECR Push</b><span>전용 프로필 분리</span></div>
+    <div class="step"><div class="n">4</div><b>Helm 매니페스트</b><span>version.yaml 태그 갱신 (GitOps)</span></div>
+    <div class="step go"><div class="n">5</div><b>ArgoCD Promote</b><span>Blue/Green 롤아웃</span></div>
+  </div>
+</section>
+
+<!-- 7 -->
+<section id="ai">
+  <h2><span class="no">07</span>AI 이슈 요약 파이프라인</h2>
+  <p class="sub">전화가 실제로 발신되는 critical 알림에 대해서만 비동기로 원인 분석을 요청합니다.</p>
+  <div class="flow">
+    <div class="step"><div class="n">1</div><b>트리거</b><span>Lambda가 alert_id 생성 후 원본 payload를 n8n Webhook으로 전송</span></div>
+    <div class="step"><div class="n">2</div><b>분석</b><span>n8n → AI Agent 호출</span></div>
+    <div class="step"><div class="n">3</div><b>콜백</b><span>결과(증상/원인/조치)를 CTR 컨슈머 Function URL로 전달</span></div>
+    <div class="step go"><div class="n">4</div><b>반영</b><span>alert_id가 같은 모든 이력 일괄 갱신 → 대시보드 표시</span></div>
+  </div>
+  <div class="grid3" style="margin-top:16px">
+    <div class="card"><h4>alert_id 상관관계</h4><p>Webhook 1회 = alert_id 1개. 수신자별이 아닌 “이슈 단위” 분석을 공유합니다.</p></div>
+    <div class="card"><h4>비용/소음 제어</h4><p>동일 그룹 10분 내 중복 요청을 억제하고, 전화가 나가는 건에 한정해 호출합니다.</p></div>
+    <div class="card"><h4>기존 인프라 재사용</h4><p>신규 Lambda 없이 CTR 컨슈머에 Function URL 트리거를 추가(이벤트 형태로 분기).</p></div>
+  </div>
+</section>
+
+<!-- 8 -->
+<section id="ops">
+  <h2><span class="no">08</span>현재 사용 중인 방식 (운영)</h2>
+  <p class="sub">현재 운영 환경에서 실제로 사용하고 있는 방식입니다.</p>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="상세 정보 표"><table>
+    <tr><th style="width:200px">영역</th><th>방식</th></tr>
+    <tr><td>알림 수신</td><td>Grafana Contact Point(Webhook) → Lambda Function URL, 시크릿 헤더 인증</td></tr>
+    <tr><td>라우팅</td><td>라벨(namespace &gt; container &gt; pod &gt; job) 기반 서비스 추출 → DynamoDB 그룹/담당자 조회 (5분 캐시)</td></tr>
+    <tr><td>알림 채널</td><td>critical = 전화 + Works / warning = Works 전용 / resolved = Works 해소 안내</td></tr>
+    <tr><td>운영 제어</td><td>대시보드 킬스위치(캐시 20초 → 최대 20초 내 반영), 재개 시각 자동 복귀</td></tr>
+    <tr><td>이력 관리</td><td>DynamoDB 적재 + 대시보드 조회, 관리자 변경은 감사 로그</td></tr>
+    <tr><td>코드 배포(Lambda)</td><td>zip 업로드 (공용 모듈 <code>call_log.py</code>를 2개 Lambda에 함께 배포)</td></tr>
+    <tr><td>코드 배포(Dashboard)</td><td>Docker → ECR → Helm 태그 갱신 → ArgoCD Blue/Green</td></tr>
+    <tr><td>인프라 정의</td><td>AWS CDK(Python) 초기 프로토타입 + 콘솔/CLI 구성 (운영 반영은 수동 배포)</td></tr>
+    <tr><td>문서화</td><td>동작 흐름 문서를 코드 기준으로 유지(플로우 변경 시 동시 갱신), 인수인계용 문서 세트(개요·아키텍처·스키마·API·배포·컨벤션)</td></tr>
+  </table></div>
+
+  <h3>메트릭 기반 알림 기준 정립 (SRE)</h3>
+  <p class="sub" style="margin-bottom:0">SRE 4 Golden Signals(Latency · Traffic · Errors · Saturation) 기준으로 클러스터에서 수집 가능한 메트릭(OTel 표준 <code>http_server_request_duration_seconds</code> 등)과 PromQL을 실측 검증하여 알림 룰 작성 기준 문서로 정리했습니다.</p>
+</section>
+
+<!-- 9 -->
+<section id="mywork">
+  <h2><span class="no">09</span>수행 내용</h2>
+  <p class="sub">기획부터 운영까지 단독으로 수행했습니다. </p>
+  <div class="tl">
+    <div class="it"><b>알림 시스템 설계 및 구축</b><span>Amazon Connect 인스턴스·Contact Flow 구성, 한국 070 번호 발신, Lambda 알림 핸들러 구현(인증·파싱·라우팅·발신)</span></div>
+    <div class="it"><b>한국어 TTS 품질 개선</b><span>영문 서비스명/알림명 발음 사전, 건수 한국어 수사 변환, 해소 알림 문구 분기</span></div>
+    <div class="it"><b>Naver Works 연동</b><span>edutech-api 경유 개인 DM / 단체방 @멘션, 수신자별 담당 알림 필터링</span></div>
+    <div class="it"><b>데이터 영속화</b><span>하드코딩 데이터 → DynamoDB 이관, 통화 억제 로직을 메모리 캐시에서 DynamoDB GSI 조회로 전환</span></div>
+    <div class="it"><b>통화 응답 감지</b><span>Connect CTR → Kinesis → Lambda 이벤트 파이프라인 구축 및 응답 판정 로직</span></div>
+    <div class="it"><b>운영 제어 기능</b><span>전역 킬스위치(자동 복귀 / fail-safe 정책), 업무시간 억제, 알림 severity 분기</span></div>
+    <div class="it"><b>AI 이슈 요약 연동</b><span>n8n 워크플로우 설계, alert_id 기반 비동기 콜백 구조</span></div>
+    <div class="it"><b>관리 대시보드 개발·배포</b><span>FastAPI + ES 모듈 프론트, 인증/PII 마스킹/감사로그, IRSA, Docker·Helm·ArgoCD 배포</span></div>
+    <div class="it"><b>아키텍처 문서 / 다이어그램</b><span>AS-IS/TO-BE 다이어그램(Python 코드화), Confluence 게시, 인수인계 문서 세트</span></div>
+  </div>
+</section>
+
+</main>
+
+
+<aside class="related-projects wrap" aria-label="다른 프로젝트"><p class="kicker">CONTINUE EXPLORING</p><h2>다른 프로젝트 살펴보기</h2><div class="related-grid"><a href="eks.html"><span>PLATFORM ENGINEERING</span><b>EKS 기반 GitOps 운영 플랫폼 ↗</b></a><a href="litellm.html"><span>AI INFRASTRUCTURE</span><b>Enterprise LLM Gateway 운영 ↗</b></a></div></aside><footer class="site-footer"><div class="wrap footer-row"><div><b>장순돌 · SoonDol Jang</b><p>서비스 개발에서 클라우드 운영까지.</p></div><div class="footer-links"><a href="../index.html">포트폴리오 홈</a><a href="https://github.com/sdjang6253" target="_blank" rel="noopener noreferrer">GitHub ↗</a><a href="https://chingdong.tistory.com/" target="_blank" rel="noopener noreferrer">개인 블로그 ↗</a><a href="#top">맨 위로 ↑</a></div></div></footer></body></html>
